@@ -1,0 +1,474 @@
+---
+title: "ECON 470 Homework 4"
+subtitle: "Submission 1, Spring 2026"
+author: "Srijon Sarkar"
+format:
+  pdf:
+    output-file: "sarkar-s-hwk4-1"
+    output-ext:  "pdf"
+    header-includes:
+      - \usepackage{float}
+      - \floatplacement{table}{H}
+---
+
+```{r}
+#| include: false
+
+# Preliminaries -----------------------------------------------------------
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(tidyverse, ggplot2, dplyr, lubridate, haven)
+
+library(knitr)
+library(kableExtra)
+```
+
+## Problem 1
+
+```{r}
+#| echo: false
+#| warning: false
+
+hcris.full <- read_tsv("../data/output/HCRIS_Data.txt")
+
+repos_year <- hcris.full %>%
+  mutate(year = year(fy_end)) %>%
+  filter(year >= 2009, year <= 2019) %>%
+  filter(source == "total for year") %>%
+  group_by(year) %>%
+  summarise(n_hospitals = n_distinct(provider_number))
+
+ggplot(repos_year, aes(x = year, y = n_hospitals)) +
+  geom_line() +
+  geom_point() +
+  labs(
+    title = "Hospitals with at least one report filing per year",
+    x = "Year",
+    y = "Count of Hospitals"
+  ) +
+  theme_minimal()
+```
+
+\newpage
+## Problem 2
+
+```{r}
+#| echo: false
+#| warning: false
+
+hcris.full %>%
+  mutate(year = year(fy_end)) %>%
+  filter(year >= 2009, year <= 2019) %>%
+  summarise(unique_num_hospitals = n_distinct(provider_number)) %>%
+  kable(
+    col.names = c("Unique Hospitals"),
+    digits    = 0,
+    booktabs  = TRUE,
+    row.names = FALSE,
+    caption   = "Number of Unique Hospitals (2009–2019)"
+  ) %>%
+  kable_styling(latex_options = c("hold_position", "striped")) %>%
+  row_spec(0, bold = TRUE)
+```
+
+\newpage
+## Problem 3
+
+```{r}
+#| echo: false
+#| warning: false
+
+hcris.full %>%
+  mutate(year = year(fy_end)) %>%
+  filter(year >= 2009, year <= 2019) %>%
+  ggplot(aes(x = factor(year), y = tot_charges)) +
+  geom_violin() +
+  scale_y_continuous(labels = scales::comma) +
+  labs(
+    title = "Total Charges Distribution Over Years",
+    x = "Year",
+    y = "Total charges"
+  ) +
+  theme_minimal()
+```
+
+\newpage
+## Problem 4
+
+```{r}
+#| echo: false
+#| warning: false
+
+hcris.full %>%
+  mutate(
+    year = year(fy_end),
+    discount_factor = 1 - tot_discounts / tot_charges,
+    price_num = (ip_charges + icu_charges + ancillary_charges) * discount_factor - tot_mcare_payment,
+    price_denom = tot_discharges - mcare_discharges,
+    price = price_num / price_denom
+  ) %>%
+  filter(year >= 2009, year <= 2019) %>%
+  filter(price > 0) %>%
+  group_by(year) %>%
+  mutate(
+    p05 = quantile(price, 0.05, na.rm = TRUE),
+    p95 = quantile(price, 0.95, na.rm = TRUE),
+    price = pmin(pmax(price, p05), p95)
+  ) %>%
+  ggplot(aes(x = factor(year), y = price)) +
+  geom_violin() +
+  scale_y_continuous(labels = scales::comma) +
+  labs(
+    title = "Hospital Prices Distribution Over Years",
+    x = "Year",
+    y = "Estimated Price"
+  ) +
+  theme_minimal()
+```
+
+\newpage
+## Problem 5
+
+```{r}
+#| echo: false
+#| warning: false
+
+hcris.full %>%
+  mutate(year = year(fy_end)) %>%
+  filter(year >= 2012, year <= 2019) %>%
+  group_by(year) %>%
+  summarise(
+    total = n(),
+    penalty = sum(hrrp_payment > 0, na.rm = TRUE),
+    share_penalty = penalty/total
+  ) %>%
+  ggplot(aes(x = year, y = share_penalty)) +
+  geom_line() +
+  geom_point() +
+  scale_y_continuous(labels = scales::percent) +
+  labs(
+    title = "Hospital proportion under penalty by HRRP/VBP",
+    x = "Year",
+    y = "Penalized Fraction"
+  ) +
+  theme_minimal()
+```
+
+\newpage
+# Estimate ATEs
+
+## Problem 6
+
+```{r}
+#| include: false
+
+# price for each hospital-year
+hcris.pricing <- hcris.full %>%
+  mutate(
+    year = year(fy_end),
+    discount_factor = 1 - tot_discounts / tot_charges,
+    price_num = (ip_charges + icu_charges + ancillary_charges) * discount_factor - tot_mcare_payment,
+    price_denom = tot_discharges - mcare_discharges,
+    price = price_num / price_denom
+  ) %>%
+  filter(price > 0) %>%
+  group_by(year) %>%
+  mutate(
+    p05 = quantile(price, 0.05, na.rm = TRUE),
+    p95 = quantile(price, 0.95, na.rm = TRUE),
+    price = pmin(pmax(price, p05), p95)
+  ) %>%
+  ungroup() %>%
+  select(provider_number, year, price, beds, mcare_discharges, mcaid_discharges, hrrp_payment, hvbp_payment)
+
+# from 2011 until 2014
+price.change <- hcris.pricing %>%
+  filter(year %in% c(2011, 2014)) %>%
+  select(provider_number, year, price) %>%
+  pivot_wider(names_from = year, values_from = price, names_prefix = "price_") %>%
+  mutate(price_change = price_2014 - price_2011)
+
+# 2012 penalize
+penalty.2012 <- hcris.pricing %>%
+  filter(year == 2012) %>%
+  mutate(net_penalty = hrrp_payment + hvbp_payment) %>%
+  select(provider_number, net_penalty)
+
+# averages before 2012 from 2009-2011
+pre.2012 <- hcris.pricing %>%
+  filter(year >= 2009, year <= 2011) %>%
+  group_by(provider_number) %>%
+  summarise(
+    avg_beds = mean(beds, na.rm = TRUE),
+    avg_mcare = mean(mcare_discharges, na.rm = TRUE),
+    avg_mcaid = mean(mcaid_discharges, na.rm = TRUE)
+  )
+
+# combined set
+hcris.combined <- price.change %>%
+  inner_join(penalty.2012, by = "provider_number") %>%
+  inner_join(pre.2012, by = "provider_number") %>%
+  filter(!is.na(price_change))
+
+ols1 <- lm(price_change ~ net_penalty, data = hcris.combined)
+ols2 <- lm(price_change ~ net_penalty + avg_beds, data = hcris.combined)
+ols3 <- lm(price_change ~ net_penalty + avg_beds + avg_mcaid, data = hcris.combined)
+
+summary(ols1)
+summary(ols2)
+summary(ols3)
+```
+
+```{r}
+#| echo: false
+#| warning: false
+
+options(knitr.kable.NA = 0)
+library(knitr)
+library(kableExtra)
+
+data.frame(
+  Statistic = c("Intercept", "Net Penalty", "Avg Beds", "Avg Medicaid", "Num.Obs.", "R2"),
+  `OLS 1` = c(
+    round(coef(ols1)["(Intercept)"],  3),
+    round(coef(ols1)["net_penalty"],  3),
+    NA,
+    NA,
+    nobs(ols1),
+    round(summary(ols1)$r.squared,   3)
+  ),
+  `OLS 2` = c(
+    round(coef(ols2)["(Intercept)"],  3),
+    round(coef(ols2)["net_penalty"],  3),
+    round(coef(ols2)["avg_beds"],     3),
+    NA,
+    nobs(ols2),
+    round(summary(ols2)$r.squared,   3)
+  ),
+  `OLS 3` = c(
+    round(coef(ols3)["(Intercept)"],  3),
+    round(coef(ols3)["net_penalty"],  3),
+    round(coef(ols3)["avg_beds"],     3),
+    round(coef(ols3)["avg_mcaid"],    3),
+    nobs(ols3),
+    round(summary(ols3)$r.squared,   3)
+  ),
+  check.names = FALSE
+) %>%
+  kable(
+    col.names = c("Statistic", "OLS 1", "OLS 2", "OLS 3"),
+    digits    = 3,
+    booktabs  = TRUE,
+    caption   = "OLS Estimates of Price Change on Penalty Status"
+  ) %>%
+  kable_styling(latex_options = c("hold_position", "striped")) %>%
+  column_spec(1, bold = TRUE) %>%
+  row_spec(0, bold = TRUE) %>%
+  pack_rows("Coefficients", 1, 4) %>%
+  pack_rows("Model Fit",    5, 6)
+```
+
+We need the estimated effect on the net penalty is not significant, as observable from the p-value. However, average beds that have a statistically significance maintains the same estimated effect size of around 0.066. Finally, when average Medicaid discharges are included, we see the most prominent significance with the lowest p-value and largest estimate magnitude.
+
+\newpage
+## Problem 7
+
+```{r}
+#| echo: false
+#| warning: false
+
+ggplot(hcris.combined, aes(x = avg_mcare, y = net_penalty)) +
+  geom_point(alpha = 0.3) +
+  scale_x_continuous(labels = scales::comma) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(
+    title = "Total penalty vs pre-2012 Medicare Discharges",
+    x = "Mean Medicare Discharges (2009-2011)",
+    y = "Total penalty (2012)"
+  ) +
+  theme_minimal()
+```
+
+\newpage
+## Problem 8
+
+```{r}
+#| include: false
+
+library(fixest)
+
+# first stage - net_penalty ~ avg_mcare (instrument)
+fs1 <- feols(net_penalty ~ avg_mcare, data = hcris.combined)
+fs2 <- feols(net_penalty ~ avg_mcare + avg_beds, data = hcris.combined)
+fs3 <- feols(net_penalty ~ avg_mcare + avg_beds + avg_mcaid, data = hcris.combined)
+
+# reduced form - price_change ~ avg_mcare (instrument)
+rf1 <- feols(price_change ~ avg_mcare, data = hcris.combined)
+rf2 <- feols(price_change ~ avg_mcare + avg_beds, data = hcris.combined)
+rf3 <- feols(price_change ~ avg_mcare + avg_beds + avg_mcaid, data = hcris.combined)
+
+cat("---First Stage---\n")
+summary(fs1)
+summary(fs2)
+summary(fs3)
+
+cat("---Reduced Form---\n")
+summary(rf1)
+summary(rf2)
+summary(rf3)
+```
+
+```{r}
+#| echo: false
+#| warning: false
+
+options(knitr.kable.NA = 0)
+library(knitr)
+library(kableExtra)
+library(fixest)
+
+data.frame(
+  Statistic = c("Intercept", "Avg Medicare", "Avg Beds", "Avg Medicaid", "Num.Obs.", "R2"),
+
+  `FS 1` = c(
+    round(coef(fs1)["(Intercept)"], 3),
+    round(coef(fs1)["avg_mcare"],   3),
+    NA,
+    NA,
+    nobs(fs1),
+    round(r2(fs1)["r2"],            3)
+  ),
+  `FS 2` = c(
+    round(coef(fs2)["(Intercept)"], 3),
+    round(coef(fs2)["avg_mcare"],   3),
+    round(coef(fs2)["avg_beds"],    3),
+    NA,
+    nobs(fs2),
+    round(r2(fs2)["r2"],            3)
+  ),
+  `FS 3` = c(
+    round(coef(fs3)["(Intercept)"], 3),
+    round(coef(fs3)["avg_mcare"],   3),
+    round(coef(fs3)["avg_beds"],    3),
+    round(coef(fs3)["avg_mcaid"],   3),
+    nobs(fs3),
+    round(r2(fs3)["r2"],            3)
+  ),
+
+  `RF 1` = c(
+    round(coef(rf1)["(Intercept)"], 3),
+    round(coef(rf1)["avg_mcare"],   3),
+    NA,
+    NA,
+    nobs(rf1),
+    round(r2(rf1)["r2"],            3)
+  ),
+  `RF 2` = c(
+    round(coef(rf2)["(Intercept)"], 3),
+    round(coef(rf2)["avg_mcare"],   3),
+    round(coef(rf2)["avg_beds"],    3),
+    NA,
+    nobs(rf2),
+    round(r2(rf2)["r2"],            3)
+  ),
+  `RF 3` = c(
+    round(coef(rf3)["(Intercept)"], 3),
+    round(coef(rf3)["avg_mcare"],   3),
+    round(coef(rf3)["avg_beds"],    3),
+    round(coef(rf3)["avg_mcaid"],   3),
+    nobs(rf3),
+    round(r2(rf3)["r2"],            3)
+  ),
+
+  check.names = FALSE
+) %>%
+  kable(
+    col.names = c("Statistic", "FS 1", "FS 2", "FS 3", "RF 1", "RF 2", "RF 3"),
+    digits    = 3,
+    booktabs  = TRUE,
+    row.names = FALSE,
+    caption   = "First Stage and Reduced Form Estimates"
+  ) %>%
+  kable_styling(latex_options = c("hold_position", "striped")) %>%
+  column_spec(1, bold = TRUE) %>%
+  row_spec(0, bold = TRUE) %>%
+  add_header_above(c(" " = 1, "First Stage" = 3, "Reduced Form" = 3)) %>%
+  pack_rows("Coefficients", 1, 4) %>%
+  pack_rows("Model Fit",    5, 6)
+```
+
+We note that in the first stage, net penalty has the largest effect and most prominent statistical significance with average Medicare discharges, whereas in reduced form the specification with average beds recovers the most statistically significant effect against after average Medicare discharges overtaking to be the most prominent in third specification of reduced form against prices with largest effect size, while average beds still stay prominent.
+
+\newpage
+## Problem 9
+
+```{r}
+#| include: false
+
+# IV estimates - price_change ~ net_penalty, instrumented by avg_mcare
+iv1 <- feols(price_change ~ 1 | net_penalty ~ avg_mcare, data = hcris.combined)
+iv2 <- feols(price_change ~ avg_beds | net_penalty ~ avg_mcare, data = hcris.combined)
+iv3 <- feols(price_change ~ avg_beds + avg_mcaid | net_penalty ~ avg_mcare, data = hcris.combined)
+
+summary(iv1)
+summary(iv2)
+summary(iv3)
+```
+
+```{r}
+#| echo: false
+#| warning: false
+
+options(knitr.kable.NA = 0)
+library(knitr)
+library(kableExtra)
+library(fixest)
+
+data.frame(
+  Statistic = c("Intercept", "Net Penalty (IV)", "Avg Beds", "Avg Medicaid", "Num.Obs.", "R2"),
+  `IV 1` = c(
+    round(coef(iv1)["(Intercept)"],          3),
+    round(coef(iv1)["fit_net_penalty"],       3),
+    NA,
+    NA,
+    nobs(iv1),
+    round(r2(iv1)["r2"],                     3)
+  ),
+  `IV 2` = c(
+    round(coef(iv2)["(Intercept)"],          3),
+    round(coef(iv2)["fit_net_penalty"],       3),
+    round(coef(iv2)["avg_beds"],             3),
+    NA,
+    nobs(iv2),
+    round(r2(iv2)["r2"],                     3)
+  ),
+  `IV 3` = c(
+    round(coef(iv3)["(Intercept)"],          3),
+    round(coef(iv3)["fit_net_penalty"],       3),
+    round(coef(iv3)["avg_beds"],             3),
+    round(coef(iv3)["avg_mcaid"],            3),
+    nobs(iv3),
+    round(r2(iv3)["r2"],                     3)
+  ),
+  check.names = FALSE
+) %>%
+  kable(
+    col.names = c("Statistic", "IV 1", "IV 2", "IV 3"),
+    digits    = 3,
+    booktabs  = TRUE,
+    row.names = FALSE,
+    caption   = "IV Estimates of Price Change on Net Penalty (Instrument: Avg Medicare Discharges)"
+  ) %>%
+  kable_styling(latex_options = c("hold_position", "striped")) %>%
+  column_spec(1, bold = TRUE) %>%
+  row_spec(0, bold = TRUE) %>%
+  pack_rows("Coefficients", 1, 4) %>%
+  pack_rows("Model Fit",    5, 6)
+```
+
+Here as well, we note that with no significant result in the first specification, the second specification with average beds becomes statistically significant, and maintains the same effect size in the third specification when included alongside average Medicaid discharges; however, yet again, average Medicaid discharges give the most prominent statistical significance with the largest effect size magnitude.
+
+\newpage
+## Problem 10
+
+LATE accounts for changes in the neighborhood of a policy decision and not throughout the context window. If a policy is implemented starting Year X, it would be misleading to include statistics of years prior to that, when such numbers would be unrelated. IV acts similarly to regression discontinuity in the sense that both give an essence of LATE. Thus, here overall ATE would be polluted by extrapolating too much beyond the policy or decision implementation period, thereby giving noisy or biased results.
+
